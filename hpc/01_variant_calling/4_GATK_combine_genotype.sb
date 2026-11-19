@@ -1,0 +1,40 @@
+#!/bin/bash  --login
+#SBATCH --job-name karan_GATK_combine_genotype
+#SBATCH --time=2:50:00
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=80G
+#SBATCH --mail-type=FAIL
+#SBATCH --mail-type=END
+#SBATCH --output=/mnt/gs21/scratch/maheymoh/karan_project_jgi/logs/slurm_logs/3_GATK_variants/combine_genotype.out
+
+# setting the base directory
+data="/mnt/gs21/scratch/maheymoh/karan_project_jgi"
+
+module purge                                                                                                                                          
+module load GATK/4.5.0.0-GCCcore-12.3.0-Java-17
+
+# changing dir to gatk_variants
+cd ${data}/gatk_variants
+
+# getting list of all variants
+  printf '%s\n' *.vcf > variants.list && sed -i 's/^/--variant /' variants.list
+
+# loading the variants.list in a variable
+  variants=$(cat variants.list)
+ 
+# combining all the gvcf files produced
+  
+ gatk --java-options -Xmx10G CombineGVCFs \
+  -R ${data}/jgi_genome/Brefa1_AssemblyScaffolds.fasta \
+  -O ${data}/gatk_variants/combined_dedup_haplo.g.vcf.gz \
+$variants
+
+# Genotype gvcfs to perform joint genotyping
+gatk --java-options -Xmx10G  GenotypeGVCFs \
+-R ${data}/jgi_genome/Brefa1_AssemblyScaffolds.fasta \
+-V ${data}/gatk_variants/combined_dedup_haplo.g.vcf.gz \
+-O ${data}/gatk_variants/combined_dedup_haplo.vcf \
+-new-qual
+
+echo "done with variant calling"

@@ -1,0 +1,18 @@
+# Data and outputs (not published here)
+vcf/
+metadata/
+structure_results/
+oak_wilt_spread_data/
+figures/
+results/
+demographic_analysis/diyabc_rf_v5/input/
+demographic_analysis/diyabc_rf_v5/bin/
+extras/diyabc_figure5_recipe/example_data/
+extras/diyabc_figure5_recipe/example_output/
+
+# OS / R
+.DS_Store
+.Rhistory
+.RData
+.Rproj.user/
+*~

@@ -1,0 +1,252 @@
+---
+title: "Clone Correction and Multilocus Genotype Analysis"
+author: "Mohit Mahey"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+```{r libraries,message=FALSE}
+# Clean environment
+rm(list = ls())
+
+# Libraries
+library(vcfR)
+library(tidyverse)
+library(adegenet)
+library(poppr)
+library(ggsci)
+library(RColorBrewer)
+library(vegan)
+```
+
+## Data Import
+
+```{r data-import}
+# Repo root (robust to rendering from rScripts/ or project root)
+repo <- "/mnt/gs21/scratch/maheymoh/karan_project_jgi/AFTER_GATK/clone_correction"
+if (!dir.exists(repo)) {
+  repo <- if (basename(getwd()) == "rScripts") dirname(getwd()) else getwd()
+}
+
+# Load VCF (oak wilt, 92 US isolates), non LD prunned
+bret_vcf <- read.vcfR(file.path(repo, "karan_biallelic_TAGs_snps_miss0.1_MAF.vcf"))
+
+# Load sample metadata; strip BOM + trailing spaces from column names, trim values
+pop_data <- read.csv(file.path(repo, "metadata.csv"), check.names = FALSE)
+names(pop_data) <- trimws(sub("^﻿", "", names(pop_data)))
+pop_data[] <- lapply(pop_data, function(x) if (is.character(x)) trimws(x) else x)
+```
+
+## Convert VCF to genlight and genind
+
+```{r vcf-gen}
+# Convert VCF to genlight and genind for poppr/adegenet
+gl_bret <- vcfR2genlight(bret_vcf)
+gi_bret <- vcfR2genind(bret_vcf)
+
+# Set ploidy — Bretziella fagacearum is a HAPLOID fungus (VCF GT are single-allele 0/1)
+ploidy(gl_bret) <- 1
+ploidy(gi_bret) <- 1
+
+# Quick checks
+gl_bret
+gi_bret
+```
+
+## Attach Metadata (Strata & Populations)
+
+```{r attach-metada}
+# Reorder metadata to VCF sample order (adegenet assigns strata positionally)
+vcf_ids  <- indNames(gl_bret)                        # = colnames(vcf@gt)[-1]
+pop_data <- pop_data[match(vcf_ids, pop_data$Sakalidis_lab_code), ]
+stopifnot(identical(pop_data$Sakalidis_lab_code, vcf_ids))
+
+# Grouping: Clusters 
+pop_data$Clusters  <- as.factor(pop_data$Clusters)
+# --- genind object ---
+strata(gi_bret) <- pop_data["Clusters"]
+pop(gi_bret)    <- strata(gi_bret)$Clusters
+
+# --- genlight object ---
+strata(gl_bret) <- pop_data["Clusters"]
+pop(gl_bret)    <- strata(gl_bret)$Clusters
+
+# Check
+gl_bret
+gi_bret
+```
+
+## Multilocus Genotypes (MLG) and SNP Clones
+
+```{r mlg-snpclone}
+# genclone object from genind
+gc_bret <- as.genclone(gi_bret)
+gc_bret@mlg   # MLG IDs
+
+# snpclone object from genlight
+sc_bret <- as.snpclone(gl_bret)
+sc_bret
+
+# Number of multilocus genotypes lineages (original)
+nmll(gc_bret)
+
+# Table of MLGs
+mlg.table(gc_bret, plot = FALSE)
+```
+
+## Choosing a Threshold for MLL (Clone Grouping)
+
+We follow the poppr vignette to use genetic distance to define a clonal threshold
+
+```{r threshold-estimation}
+filtered.thresholds <- filter_stats(sc_bret, distance = bitwise.dist, plot = TRUE)
+
+# Collect threshold statistics using bitwise.dist on snpclone
+thresholds <- mlg.filter(
+  sc_bret,
+  distance  = "bitwise.dist",
+  stats     = "THRESHOLDS",
+  threshold = 0.5
+)
+
+# Use cutoff_predictor() to suggest a threshold
+pcut <- cutoff_predictor(thresholds)
+pcut
+```
+
+```{r apply-threshold}
+# 1) Contract MLGs into MLLs at the predicted threshold (in-place; poppr API,
+#    not a raw @mlg slot assignment — the mlg slot is an MLG S4 object)
+mlg.filter(sc_bret, distance = bitwise.dist) <- pcut
+
+# checking number of linages
+nmll(sc_bret)
+
+# 2) Clone-correct (keep 1 per MLL per Clusters)
+sc_bret_cc <- clonecorrect(sc_bret, strata = ~Clusters, keep = 1)
+
+# sanity checks
+nmll(sc_bret)      # MLL count after contraction
+nInd(sc_bret_cc)   # how many kept after clone correction
+mlg.table(sc_bret_cc, plot = FALSE)   # plot=FALSE: poppr barplot breaks on ggplot2 >=3.5
+
+mlg.id(sc_bret)
+mlg.id(sc_bret_cc)
+indNames(sc_bret_cc)
+
+# Match the retained sample IDs back to metadata and add their MLL
+cc_metadata <- pop_data[match(indNames(sc_bret_cc), pop_data$Sakalidis_lab_code), ]
+    cc_metadata$MLL <- mll(sc_bret_cc)
+
+    # Export complete metadata for clone-corrected isolates
+    write.csv(
+      cc_metadata,
+      file = file.path(repo, "results/clone_corrected_metadata.csv"),
+      row.names = FALSE
+    )
+```
+
+## Clonal Diversity: Before vs. After Clone Correction
+
+Here we evaluate genotypic diversity ($H$, $G$, $\lambda$, $E_5$) across populations before ($N = 92$) and after ($N = 64$) clone correction using the contracted Multilocus Lineages (MLLs).
+
+```{r mll-diversity-stats}
+# Calculate genotypic diversity directly from the contracted MLL frequency tables
+cat("=== Pre-Clone Correction MLL Diversity (N = 92) ===\n")
+tab_pre_cc  <- mlg.table(sc_bret, plot = FALSE)
+div_pre_df  <- as.data.frame(diversity_stats(tab_pre_cc))
+div_pre_df$N   <- rowSums(tab_pre_cc)
+div_pre_df$MLG <- rowSums(tab_pre_cc > 0)
+div_pre_df <- div_pre_df[, c("N", "MLG", "H", "G", "lambda", "E.5")]
+print(div_pre_df)
+
+cat("\n=== Post-Clone Correction MLL Diversity (N = 64) ===\n")
+tab_post_cc <- mlg.table(sc_bret_cc, plot = FALSE)
+div_post_df <- as.data.frame(diversity_stats(tab_post_cc))
+div_post_df$N   <- rowSums(tab_post_cc)
+div_post_df$MLG <- rowSums(tab_post_cc > 0)
+div_post_df <- div_post_df[, c("N", "MLG", "H", "G", "lambda", "E.5")]
+print(div_post_df)
+
+# Export MLL diversity tables
+write.csv(div_pre_df,
+          file = file.path(repo, "results/mll_diversity_stats_pre_CC.csv"),
+          row.names = TRUE, quote = FALSE)
+
+write.csv(div_post_df,
+          file = file.path(repo, "results/mll_diversity_stats_post_CC.csv"),
+          row.names = TRUE, quote = FALSE)
+```
+
+## Standardized Index of Association (rbarD) per Population
+
+```{r rbard-by-pop}
+# 1. Pre-Clone Correction rbarD for each population (N = 92)
+cat("=== Pre-Clone Correction rbarD by Population (N = 92) ===\n")
+rbarD_pre_pop <- sapply(popNames(sc_bret), function(p) {
+  sub_sc <- sc_bret[pop(sc_bret) == p, ]
+  if (nInd(sub_sc) >= 3) round(bitwise.ia(sub_sc), 4) else NA
+})
+print(rbarD_pre_pop)
+
+# 2. Post-Clone Correction rbarD for each population (N = 64)
+cat("\n=== Post-Clone Correction rbarD by Population (N = 64) ===\n")
+rbarD_post_pop <- sapply(popNames(sc_bret_cc), function(p) {
+  sub_sc <- sc_bret_cc[pop(sc_bret_cc) == p, ]
+  if (nInd(sub_sc) >= 3 && nmll(sub_sc) >= 2) round(bitwise.ia(sub_sc), 4) else NA
+})
+print(rbarD_post_pop)
+
+# 3. Create clean summary tables with dataset totals
+rbarD_pre_df <- data.frame(
+  Pop   = c(names(rbarD_pre_pop), "Total"),
+  rbarD = c(unname(rbarD_pre_pop), round(bitwise.ia(sc_bret), 4)),
+  stringsAsFactors = FALSE
+)
+
+rbarD_post_df <- data.frame(
+  Pop   = c(names(rbarD_post_pop), "Total"),
+  rbarD = c(unname(rbarD_post_pop), round(bitwise.ia(sc_bret_cc), 4)),
+  stringsAsFactors = FALSE
+)
+
+# Export rbarD summaries to results/
+write.csv(rbarD_pre_df,
+          file = file.path(repo, "results/rbard_summary_pre_CC.csv"),
+          row.names = FALSE, quote = FALSE)
+
+write.csv(rbarD_post_df,
+          file = file.path(repo, "results/rbard_summary_post_CC.csv"),
+          row.names = FALSE, quote = FALSE)
+```
+
+## Poppr Summary on Full Dataset (True N = 92 with MLL as MLG)
+
+```{r poppr-mll-summary}
+# Transfer contracted MLL definitions from snpclone to existing genclone object
+mll.custom(gc_bret) <- mll(sc_bret)
+
+# Run poppr summary on the full dataset (true N = 92, MLG = 64)
+poppr_summary <- poppr(gc_bret, plot = FALSE)
+print(poppr_summary)
+
+# Export poppr summary table
+write.csv(
+  as.data.frame(poppr_summary),
+  file = file.path(repo, "results/poppr_diversity_summary.csv"),
+  row.names = FALSE,
+  quote = FALSE
+)
+```

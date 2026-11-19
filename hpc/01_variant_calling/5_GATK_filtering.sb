@@ -1,0 +1,69 @@
+#!/bin/bash  --login
+#SBATCH --job-name karan_GATK_filtering
+#SBATCH --time=2:50:00
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=80G
+#SBATCH --mail-type=FAIL
+#SBATCH --mail-type=END
+#SBATCH --output=/mnt/gs21/scratch/maheymoh/karan_project_jgi/logs/slurm_logs/3_GATK_variants/variants_filtering.out
+
+# GATK hard filtering: SelectVariants + VariantFiltration on joint-genotyped VCF
+
+DIR="/mnt/gs21/scratch/maheymoh/karan_project_jgi"
+GENOME="${DIR}/jgi_genome/Brefa1_AssemblyScaffolds.fasta"
+
+export _JAVA_OPTIONS="-Xms12G -Xmx14G"
+
+module purge
+module load GATK/4.5.0.0-GCCcore-12.3.0-Java-17
+
+mkdir -p ${DIR}/variant_filtered
+
+# subset SNPs and indels from joint-genotyped VCF
+gatk SelectVariants \
+     -V ${DIR}/gatk_variants/combined_dedup_haplo.vcf \
+     -select-type SNP \
+     -O ${DIR}/variant_filtered/snps_only.vcf.gz
+
+gatk SelectVariants \
+     -V ${DIR}/gatk_variants/combined_dedup_haplo.vcf \
+     -select-type INDEL \
+     -O ${DIR}/variant_filtered/indels_only.vcf.gz
+
+# hard filter SNPs
+gatk VariantFiltration \
+     -R ${GENOME} \
+     -V ${DIR}/variant_filtered/snps_only.vcf.gz \
+     -O ${DIR}/variant_filtered/snps_filtered.vcf \
+     -filter "QD < 2.0" --filter-name "QD" \
+     -filter "MQ < 59.9" --filter-name "MQ59" \
+     -filter "MQRankSum < -2.5" --filter-name "MQRankSum" \
+     -filter "ReadPosRankSum < -4.0" --filter-name "ReadPosRankSum" \
+     -filter "DP < 10" --filter-name "DP_10"
+
+# hard filter indels
+gatk VariantFiltration \
+     -R ${GENOME} \
+     -V ${DIR}/variant_filtered/indels_only.vcf.gz \
+     -O ${DIR}/variant_filtered/indels_filtered.vcf \
+     -filter "QD < 2.0" --filter-name "QD" \
+     -filter "MQ < 59.9" --filter-name "MQ59" \
+     -filter "MQRankSum < -2.5" --filter-name "MQRankSum" \
+     -filter "ReadPosRankSum < -4.0" --filter-name "ReadPosRankSum" \
+     -filter "DP < 10" --filter-name "DP_10"
+
+# keep only PASS variants
+gatk SelectVariants \
+     -R ${GENOME} \
+     -V ${DIR}/variant_filtered/snps_filtered.vcf \
+     --exclude-filtered \
+     -O ${DIR}/variant_filtered/snps_passed_filtered.vcf
+
+gatk SelectVariants \
+     -R ${GENOME} \
+     -V ${DIR}/variant_filtered/indels_filtered.vcf \
+     --exclude-filtered \
+     -O ${DIR}/variant_filtered/indels_passed_filtered.vcf
+
+echo "done with variant filtering"

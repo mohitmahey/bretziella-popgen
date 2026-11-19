@@ -1,0 +1,100 @@
+#!/bin/bash  --login
+#SBATCH --job-name karan_bwa_aligning
+#SBATCH --time=2:50:00
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=80G
+#SBATCH --mail-type=FAIL
+#SBATCH --mail-type=END
+#SBATCH --array=1-92%10
+#SBATCH --output=/mnt/gs21/scratch/maheymoh/karan_project_jgi/logs/slurm_logs/2_alignment/align-%A_%a.out
+
+# this script will take the cleaned and trimmed files 
+# and align them using bwa mem and then using samtools
+# sam files will be converted to bam files and be indexed
+
+# setting the base directory
+data="/mnt/gs21/scratch/maheymoh/karan_project_jgi"
+
+# first step is to index the genome
+# only needs to do ones and is done so not gonna repeat
+# bwa index ${data}/jgi_genome/Brefa1_AssemblyScaffolds.fasta.gz
+
+# making directory for aligned files
+mkdir -p  ${data}/aligned_files
+
+# making directory for quality control files
+mkdir -p ${data}/aligned_files/quality_check
+
+# making dir for quality control files
+mkdir -p ${data}/aligned_files/quality_check/final_check
+
+# making directory for qc files of sam_validation
+mkdir -p ${data}/aligned_files/quality_check/sam_validation
+
+# making directory for deduplicated check
+mkdir -p ${data}/aligned_files/quality_check/dedup_check
+
+# directory for saving the wgs_metrics from the aligned bams
+mkdir -p ${data}/aligned_files/quality_check/wgs_metrics
+
+# cd in working_Dir
+cd ${data}/cleaned_files
+
+# assigning the file names to the slurm job id
+file=$(sed -n "${SLURM_ARRAY_TASK_ID}p" "$data/samples.list") 
+
+echo "======================================"
+echo "     ALIGNMENT FOR: ${file}        "
+echo "======================================"
+
+module purge
+module load BWA/0.7.17-20220923-GCCcore-12.3.0
+# to align the files we will use bwa mem script
+bwa mem -t 12 -P -R "@RG\tID:${file}\tSM:${file}\tPL:ILLUMINA\tLB:${file}\tPU:RTSF" \
+        -o ${data}/aligned_files/${file}_aligned.sam ${data}/jgi_genome/Brefa1_AssemblyScaffolds.fasta.gz ${file}_R1.fastq ${file}_R2.fastq        
+
+module purge
+module load picard/3.0.0-Java-17
+# validate sam files
+java -jar $EBROOTPICARD/picard.jar ValidateSamFile \
+         -I ${data}/aligned_files/${file}_aligned.sam \
+         -MODE SUMMARY > ${data}/aligned_files/quality_check/sam_validation/${file}_samfilevalidation
+
+module purge
+module load SAMtools/1.23.1-GCC-14.3.0 
+# converting sam to bam and sorting them
+samtools view -hb -@ 12 ${data}/aligned_files/${file}_aligned.sam | samtools sort -@ 12  \
+              -o ${data}/aligned_files/${file}_sorted.bam
+
+module purge
+module load picard/3.0.0-Java-17
+# removing the duplicated regions using picard mark duplicates before indexing the files
+ java -jar -Xms12G -Xmx14G $EBROOTPICARD/picard.jar MarkDuplicates \
+                   -I ${data}/aligned_files/${file}_sorted.bam \
+                   -O ${data}/aligned_files/${file}_dedup_sort.bam \
+                   -M ${data}/aligned_files/quality_check/dedup_check/${file}.txt
+
+# collecting coverage metrics
+java -jar -Xms12G -Xmx14G $EBROOTPICARD/picard.jar CollectWgsMetrics \
+                  -I ${data}/aligned_files/${file}_sorted.bam \
+                  -O ${data}/aligned_files/quality_check/wgs_metrics/${file}.txt \
+                  -R ${data}/jgi_genome/Brefa1_AssemblyScaffolds.fasta.gz
+
+ module purge
+module load SAMtools/1.23.1-GCC-14.3.0
+# files having removed duplicates are called "dedup" = deduplicated
+# indexing the files
+ samtools index ${data}/aligned_files/${file}_dedup_sort.bam
+
+# doing Quality control on the deduplicated files   
+   samtools flagstat ${data}/aligned_files/${file}_dedup_sort.bam > ${data}/aligned_files/quality_check/final_check/${file}_qc
+
+# removing the sam files for saving space
+      rm ${data}/aligned_files/${file}_aligned.sam 
+
+echo "BWA processing for ${file} is complete"
+
+# moving the slurm files to the name of th log
+cp ${data}/logs/slurm_logs/2_alignment/align-${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}.out ${data}/logs/slurm_logs/2_alignment/align-${file}.out
+rm  ${data}/logs/slurm_logs/2_alignment/align-${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}.out

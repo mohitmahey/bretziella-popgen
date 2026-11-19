@@ -1,0 +1,74 @@
+#!/bin/bash  --login
+#SBATCH --job-name karan_GATK_haplotypecaller
+#SBATCH --time=2:50:00
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=80G
+#SBATCH --mail-type=FAIL
+#SBATCH --mail-type=END
+#SBATCH --array=1-92%10
+#SBATCH --output=/mnt/gs21/scratch/maheymoh/karan_project_jgi/logs/slurm_logs/3_GATK_variants/halpotypecaller-%A_%a.out
+
+# this script will convert bam to gcvf files using
+# GATK pipeline and haplotypecaller tool
+
+# setting the base directory
+data="/mnt/gs21/scratch/maheymoh/karan_project_jgi"
+
+# changing to base dir
+cd ${data}
+
+# index the reference genome .dict using picardTools
+# and then .fai using samtools
+# we have already fone these steps ones, only need to do ones
+
+# loading required modules
+#module purge
+#module load picard/3.0.0-Java-17
+
+# running picard on the genome, needs to be done ones
+#java -jar $EBROOTPICARD/picard.jar CreateSequenceDictionary R=${data}/jgi_genome/Brefa1_AssemblyScaffolds.fasta \
+#O=${data}/jgi_genome/Brefa1_AssemblyScaffolds.dict 
+
+# loading samtools for indexing
+#module purge
+#module load SAMtools/1.23.1-GCC-14.3.0
+
+# running samtools to create index file .fai
+#samtools faidx ${data}/jgi_genome/Brefa1_AssemblyScaffolds.fasta
+
+# running the gatk haplotypecaller
+# add  --java-options "-Xmx10G" when running in batch
+
+# loading the GATK toolkit
+module purge
+module load GATK/4.5.0.0-GCCcore-12.3.0-Java-17
+
+# making dir for the gatk_variants
+mkdir -p ${data}/gatk_variants
+
+# getting the version of the tool
+gatk --java-options -Xmx10G HaplotypeCaller --version
+
+# setting file id from the slurm task ids
+file=$(sed -n "${SLURM_ARRAY_TASK_ID}p" "${data}/samples.list")
+
+echo "======================================"
+echo "     calling varinats FOR: ${file}        "
+echo "======================================"
+
+# running haplotypecaller
+   gatk --java-options -Xmx10G HaplotypeCaller \
+        -R ${data}/jgi_genome/Brefa1_AssemblyScaffolds.fasta \
+        -I ${data}/aligned_files/${file}_dedup_sort.bam \
+        -O ${data}/gatk_variants/${file}_dedup_haplo.g.vcf \
+        -ERC GVCF \
+        --standard-min-confidence-threshold-for-calling 30.0 \
+        --output-mode EMIT_VARIANTS_ONLY \
+        --min-base-quality-score 15 \
+        --native-pair-hmm-threads 12 \
+        --sample-ploidy 1 
+echo "haplotype caller processing for ${file} is complete"
+
+cp ${data}/logs/slurm_logs/3_GATK_variants/halpotypecaller-${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}.out ${data}/logs/slurm_logs/3_GATK_variants/halpotypecaller-${file}.out
+rm ${data}/logs/slurm_logs/3_GATK_variants/halpotypecaller-${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}.out
